@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
-import { ethers } from 'ethers';
-import * as NFTLendingPlatform from '../../build/contracts/NFTLendingPlatform.json'; 
+import Web3 from 'web3';
+import { AbiItem } from 'web3-utils';
+import * as NFTLendingABI from '../../build/contracts/NFTLending.json'; 
 
 require("dotenv").config()
 const router = express.Router();
@@ -9,34 +10,66 @@ const INFURA_PROJECT_ID = process.env.INFURA_PROJECT_ID;
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
-const provider = new ethers.providers.JsonRpcProvider(`https://mainnet.infura.io/v3/${INFURA_PROJECT_ID}`);
-const wallet = new ethers.Wallet(PRIVATE_KEY!, provider);
-const contract = new ethers.Contract(CONTRACT_ADDRESS!, NFTLendingPlatform.abi, wallet);
-
-const eligible_contract_addresses = [
-    '0xBC4CA0EdA7647A8aB7C2061c2E118A18a936f13D' //boredApe 
+const web3 = new Web3(new Web3.providers.HttpProvider(INFURA_PROJECT_ID!));
+const lendingContract = new web3.eth.Contract(NFTLendingABI.abi as AbiItem[], CONTRACT_ADDRESS);
+const erc721ABI = [
+    {
+        "constant": true,
+        "inputs": [{ "name": "owner", "type": "address" }],
+        "name": "balanceOf",
+        "outputs": [{ "name": "", "type": "uint256" }],
+        "payable": false,
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "constant": true,
+        "inputs": [{ "name": "owner", "type": "address" }, { "name": "index", "type": "uint256" }],
+        "name": "tokenOfOwnerByIndex",
+        "outputs": [{ "name": "", "type": "uint256" }],
+        "payable": false,
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "constant": true,
+        "inputs": [{ "name": "tokenId", "type": "uint256" }],
+        "name": "tokenURI",
+        "outputs": [{ "name": "", "type": "string" }],
+        "payable": false,
+        "stateMutability": "view",
+        "type": "function"
+    }
 ];
+
+type LendingDetails = {
+    loanValue: number,
+    repaymentValue: number
+}
+
+const eligible_contract_addresses = new Map<string, LendingDetails>();
+
+eligible_contract_addresses.set("0xBC4CA0EdA7647A8aB7C2061c2E118A18a936f13D", { loanValue: 3, repaymentValue: 3.5 }) // Bored Ape Yacht Club
+eligible_contract_addresses.set("0xb47e3cd837dDF8e4c57F05d70Ab865de6e193BBB", { loanValue: 2, repaymentValue: 2.4 }) // CryptoPunks
 
 //Fetch list of NFTs owned by user
 router.get('/nfts/:address', async (req: Request, res: Response) => {
     try {
     const address = req.params.address;
 
-        const provider = new ethers.providers.InfuraProvider( process.env.INFURA_API_URL);
-    const erc721ABI = [
-        "function balanceOf(address owner) view returns (uint256)",
-        "function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)",
-        "function tokenURI(uint256 tokenId) view returns (string)"
-    ];
-
     let nfts = [];
-    for (const nftContractAddress of eligible_contract_addresses ) {
-        const contract = new ethers.Contract(nftContractAddress, erc721ABI, provider);
-        const balance = await contract.balanceOf(address);
+    for (const nftContractAddress of eligible_contract_addresses.keys() ) {
+        const contract = new web3.eth.Contract(erc721ABI, nftContractAddress);
+        const balanceString: string = await contract.methods.balanceOf(address).call();
+        const balance: number = parseInt(balanceString); // Ensure balance is a number
+
+        const details = eligible_contract_addresses.get(nftContractAddress)
+
+        
         for (let i = 0; i < balance; i++) {
-            const tokenId = await contract.tokenOfOwnerByIndex(address, i);
-            const tokenURI = await contract.tokenURI(tokenId);
-            nfts.push({ tokenId, tokenURI });
+            const tokenId = await contract.methods.tokenOfOwnerByIndex(address, i).call();
+            const tokenURI = await contract.methods.tokenURI(tokenId).call();
+            nfts.push({ tokenId, tokenURI, nftAddress: nftContractAddress, loanValue: details!.loanValue,  repaymentValue: details!.repaymentValue});
         }
     }
     res.json(nfts);
@@ -45,125 +78,107 @@ router.get('/nfts/:address', async (req: Request, res: Response) => {
   }
 });
 
-// Collateralize NFT 
-router.post('/collateralize', async (req: Request, res: Response) => {
+//Collateralize NFT and lend ETH
+router.post('/lend', async (req: Request, res: Response) => {
     try {
-        const { nftAddress, tokenId, nftValue } = req.body;
-        if (!nftAddress || !tokenId || !nftValue) {
-            res.status(400).json({ error: 'Missing parameters' });
-        }
-        // Estimate loan amount (70% of the NFT value)
-        const maxLoanAmount = ethers.utils.parseEther(nftValue.toString()).mul(70).div(100);
-
-        // Call the contract's collateralizeNFT function
-        const tx = await contract.collateralizeNFT(nftAddress, tokenId, nftValue, { gasLimit: 1000000 });
-        await tx.wait();
-        res.json({ success: true, transactionHash: tx.hash });
+      const { nftAddress, tokenId, userAddress } = req.body;
+  
+      const transaction = lendingContract.methods.collateralizeNFT(nftAddress, tokenId);
+      const gas = String(await transaction.estimateGas({ from: userAddress }));
+      const tx = await transaction.send({ from: userAddress, gas });
+  
+      res.json({ success: true, tx });
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Failed to collateralize NFT' });
+      res.status(500).json({ error: 'Error collateralizing NFT' });
     }
+  });
+
+router.post('/repay', async (req: Request, res: Response) => {
+	try {
+		const { loanId, userAddress, repaymentAmount } = req.body;
+		if (!loanId || !repaymentAmount) {
+			res.status(400).json({ error: 'Missing parameters' });
+		}
+		const transaction = lendingContract.methods.repayLoan(loanId);
+		const gas = String(await transaction.estimateGas({ from: userAddress, value: web3.utils.toWei(repaymentAmount, 'ether') }));
+		const tx = await transaction.send({ from: userAddress, value: web3.utils.toWei(repaymentAmount, 'ether'), gas });
+
+		res.json({ success: true, transaction:tx });
+	} catch (error) {
+		res.status(500).json({ error: 'Error repaying loan' });
+	}
 });
 
-// 2. Repay Loan
-router.post('/repay', async (req: Request, res: Response) => {
-    try {
-        const { loanId, repaymentAmount } = req.body;
-    
-        if (!loanId || !repaymentAmount) {
-            res.status(400).json({ error: 'Missing parameters' });
-        }
-    
-        const amount = ethers.utils.parseEther(repaymentAmount.toString());
-    
-        // Call the smart contract's repayLoan function
-        const tx = await contract.repayLoan(loanId, { value: amount, gasLimit: 1000000 });
-        await tx.wait();
-        
-        res.json({ success: true, transactionHash: tx.hash });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Failed to repay loan' });
-    }
-  });
-  
-// 3. Pay Interest
-router.post('/pay-interest', async (req: Request, res: Response) => {
-    try {
-        const { loanId, interestAmount } = req.body;
-    
-        if (!loanId || !interestAmount) {
-            res.status(400).json({ error: 'Missing parameters' });
-        }
-    
-        const amount = ethers.utils.parseEther(interestAmount.toString());
-    
-        // Call the smart contract's payInterest function
-        const tx = await contract.payInterest(loanId, { value: amount, gasLimit: 1000000 });
-        await tx.wait();
-        
-        res.json({ success: true, transactionHash: tx.hash });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Failed to pay interest' });
-    }
-  });
-  
-// 4. Withdraw Interest (Owner only)
+// Withdraw Interest (Owner only)
 router.post('/withdraw', async (req: Request, res: Response) => {
-    try {
-        // Call the smart contract's withdraw function (onlyOwner)
-        const tx = await contract.withdraw({ gasLimit: 1000000 });
-        await tx.wait();
-        
-        res.json({ success: true, transactionHash: tx.hash });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Failed to withdraw funds' });
-    }
-  });
+	try {
+		// Get the owner address from the contract
+    const ownerAddress = await lendingContract.methods.owner().call();
+		const account = req.body.account;
 
-// 5. Check Default
+    // Check if the current account (from PRIVATE_KEY) is the owner
+    if (account.address !== ownerAddress) {
+			res.status(403).json({ error: 'Only the owner can withdraw funds' });
+    }
+		// Call the smart contract's withdraw function (onlyOwner)
+		const tx = await lendingContract.methods.withdraw();
+		const gas = String(await tx.estimateGas({ from: account.address }));
+		// Send transaction
+    const receipt = await tx.send({
+      from: account.address,
+      gas: gas
+    });
+		
+		res.json({ success: true, transactionHash: tx });
+	} catch (error) {
+			console.error(error);
+			res.status(500).json({ error: 'Failed to withdraw funds' });
+	}
+});
+  
+
+
+// // 5. Check Default
 router.get('/check-default/:loanId', async (req: Request, res: Response) => {
     try {
-        const { loanId } = req.params;
-    
-        if (!loanId) {
-            res.status(400).json({ error: 'Missing loan ID' });
-        }
-    
-        // Call the smart contract's checkDefault function
-        const tx = await contract.checkDefault(loanId, { gasLimit: 1000000 });
-        await tx.wait();
-        
-        res.json({ success: true, transactionHash: tx.hash });
-    }catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Failed to check loan default' });
-    }
+			const { loanId, account } = req.params;
+	
+			if (!loanId) {
+					res.status(400).json({ error: 'Missing loan ID' });
+			}
+			// Fetch loan details from the contract
+			const loanDetails = await lendingContract.methods.loans(loanId).call();
+	
+			// Check if the loan period has expired
+			const currentTime = Math.floor(Date.now() / 1000); // Get current time in seconds
+			const loanDurationExpired = currentTime > parseInt(loanDetails.startTime) + parseInt(process.env.LOAN_DURATION!);
+	
+			if (!loanDurationExpired) {
+				res.status(400).json({ message: 'Loan period has not yet expired.' });
+			}
+	
+			// Call checkDefault to transfer NFT to the contract owner
+			const tx = lendingContract.methods.checkDefault(loanId);
+			const gas = String(await tx.estimateGas({ from: account }));
+	
+			// Send the transaction
+			const receipt = await tx.send({
+				from: account,
+				gas: gas
+			});
+	
+			// Transaction was successful
+			res.json({
+				success: true,
+				message: `Default check performed, NFT transferred to contract owner for loan ID ${loanId}.`,
+				txHash: receipt.transactionHash
+			});
+	
+		} catch (error) {
+			console.error('Error checking default status:', error);
+			res.status(500).json({ error: 'Failed to check default status.' });
+		}
   });
 
-router.get('/loans/:address', async (req: Request, res: Response) => {
-    try {
-      const borrowerAddress = req.params.address;
-      const loans = await contract.getLoansByBorrower(borrowerAddress);
-  
-      const formattedLoans = loans.map((loan: any) => ({
-        nftAddress: loan.nftAddress,
-        tokenId: loan.tokenId.toString(),
-        loanAmount: ethers.utils.formatEther(loan.loanAmount),
-        nftValue: ethers.utils.formatEther(loan.nftValue),
-        startTime: loan.startTime.toString(),
-        lastInterestPaid: loan.lastInterestPaid.toString(),
-        missedPayments: loan.missedPayments.toString(),
-        isRepaid: loan.isRepaid,
-      }));
-  
-      res.json(formattedLoans);
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Failed to fetch loans' });
-    }
-});
 
 export default router;

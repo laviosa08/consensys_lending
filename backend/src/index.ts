@@ -13,7 +13,7 @@ app.use(cors());
 
 app.use(express.json());
 
-app.use('api/loan',loanRoutes);
+app.use('loan/',loanRoutes);
 
 app.get('/',(req: Request, res: Response) => {
   res.send('NFT Lending Backend is running.');
