@@ -41,7 +41,15 @@ const erc721ABI = [
         "type": "function"
     }
 ];
-
+type loanDetails = {
+	borrower:string,
+	nftAddress:string,
+	tokenId:BigInt,
+	loanAmount:BigInt,
+	repaymentAmount:BigInt,
+	startTime:string,
+	isRepaid:Boolean
+}
 type LendingDetails = {
     loanValue: number,
     repaymentValue: number
@@ -147,7 +155,7 @@ router.get('/check-default/:loanId', async (req: Request, res: Response) => {
 					res.status(400).json({ error: 'Missing loan ID' });
 			}
 			// Fetch loan details from the contract
-			const loanDetails = await lendingContract.methods.loans(loanId).call();
+			const loanDetails:loanDetails = await lendingContract.methods.loans(loanId).call();
 	
 			// Check if the loan period has expired
 			const currentTime = Math.floor(Date.now() / 1000); // Get current time in seconds
