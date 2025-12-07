@@ -3,6 +3,12 @@
 ### Frontend
 #### Install necessary libraries
 
+## 📹 Demo Video
+
+[![Watch VoiceOwl demo](https://img.youtube.com/vi/Zm7cYb4Q_h4/maxresdefault.jpg)](
+https://www.youtube.com/watch?v=Zm7cYb4Q_h4
+)
+
 ```sh
 cd frontend
 npm install
